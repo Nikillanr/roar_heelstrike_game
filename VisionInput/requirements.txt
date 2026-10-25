@@ -1,0 +1,5 @@
+# Python 3.11 or 3.12, 64-bit. Use a dedicated virtual environment.
+# MediaPipe depends on contrib OpenCV; install only that cv2 distribution.
+mediapipe==0.10.21
+opencv-contrib-python==4.11.0.86
+numpy==1.26.4

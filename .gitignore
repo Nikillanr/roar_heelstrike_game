@@ -1,0 +1,17 @@
+**/[Ll]ibrary/
+**/[Tt]emp/
+**/[Oo]bj/
+**/[Ll]ogs/
+**/[Uu]ser[Ss]ettings/
+**/[Bb]uild/
+**/[Bb]uilds/
+*.csproj
+*.sln
+*.user
+*.apk
+*.aab
+*.log
+**/.venv/
+**/__pycache__/
+VisionInput/models/
+.tools/
