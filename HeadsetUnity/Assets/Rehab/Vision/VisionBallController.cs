@@ -10,7 +10,7 @@ namespace MTPAD.Rehab.Headset.Vision
         public Transform anchor;
         public Vector3 localPosition = new Vector3(0f, 0f, 2f);
         public float diameterMeters = 0.25f;
-        public float trackingLossGraceSeconds = 0.6f;
+        public float trackingLossGraceSeconds = 0.15f;
         public Color color = new Color(0.15f, 0.95f, 0.35f);
         public Material materialTemplate;
         [Tooltip("Horizontal viewport interval for the left ball; mirrored for the right ball.")]
@@ -19,6 +19,7 @@ namespace MTPAD.Rehab.Headset.Vision
         public bool LeftVisible { get { return IsVisible(left); } }
         public bool RightVisible { get { return IsVisible(right); } }
         public bool Visible { get { return LeftVisible || RightVisible; } }
+        public double LastActivationMilliseconds { get; private set; }
 
         private sealed class HandBall
         {
@@ -40,6 +41,7 @@ namespace MTPAD.Rehab.Headset.Vision
         private void OnEnable()
         {
             connectionRevision = -1;
+            LastActivationMilliseconds = -1d;
             ResetTracking(left);
             ResetTracking(right);
         }
@@ -59,6 +61,7 @@ namespace MTPAD.Rehab.Headset.Vision
 
         private void UpdateHand(HandBall hand, bool isLeft, bool fresh, string state)
         {
+            bool wasVisible = IsVisible(hand);
             if (fresh && state != "unknown")
             {
                 hand.LastConfirmedAt = receiver.ReceivedAt;
@@ -67,12 +70,19 @@ namespace MTPAD.Rehab.Headset.Vision
             bool show = fresh && hand.LastRaised;
             if (show && state == "unknown")
                 show = RehabClock.MonotonicSeconds - hand.LastConfirmedAt <= Mathf.Max(0f, trackingLossGraceSeconds);
-            if (show && !IsVisible(hand))
+            if (show && !wasVisible)
             {
                 if (hand.Ball == null) CreateBall(hand, isLeft);
                 PositionBall(hand, isLeft);
             }
             if (hand.Ball != null) hand.Ball.SetActive(show);
+            if (show && !wasVisible)
+                LastActivationMilliseconds = System.Math.Max(0d, (RehabClock.MonotonicSeconds - receiver.ReceivedAt) * 1000d);
+        }
+
+        private void LateUpdate()
+        {
+            if (receiver != null) receiver.ReportPresentation(LeftVisible, RightVisible);
         }
 
         private void CreateBall(HandBall hand, bool isLeft)

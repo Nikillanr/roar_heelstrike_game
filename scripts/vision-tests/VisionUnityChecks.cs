@@ -59,11 +59,57 @@ public static class VisionUnityChecks
         if (!EditorApplication.isPlaying) EditorApplication.EnterPlaymode();
     }
 
+    public static void RunNetworkBenchmark()
+    {
+        SessionState.SetBool("VisionNetworkBenchmark", true);
+        Run();
+    }
+
+    public static void RunLiveBenchmark()
+    {
+        SessionState.SetBool("VisionLiveBenchmark", true);
+        RunNetworkBenchmark();
+    }
+
+    private static double benchmarkDeadline;
+
+    private static void StartNetworkBenchmark()
+    {
+        var root = new GameObject("Latency benchmark");
+        root.SetActive(false);
+        var camera = root.AddComponent<Camera>();
+        var receiver = root.AddComponent<VisionStateReceiver>();
+        receiver.port = 17778;
+        var controller = root.AddComponent<VisionBallController>();
+        controller.receiver = receiver;
+        controller.anchor = camera.transform;
+        Application.runInBackground = true;
+        Application.targetFrameRate = 60;
+        root.SetActive(true);
+        benchmarkDeadline = EditorApplication.timeSinceStartup + (SessionState.GetBool("VisionLiveBenchmark", false) ? 35 : 15);
+        SessionState.SetBool("VisionLiveBenchmark", false);
+        EditorApplication.update += FinishNetworkBenchmark;
+        Debug.Log("VISION_NETWORK_READY: " + receiver.Status);
+    }
+
+    private static void FinishNetworkBenchmark()
+    {
+        if (EditorApplication.timeSinceStartup < benchmarkDeadline) return;
+        EditorApplication.update -= FinishNetworkBenchmark;
+        EditorApplication.Exit(0);
+    }
+
     private static void WaitForPlay()
     {
         if (!EditorApplication.isPlaying || !Application.isPlaying) return;
         EditorApplication.update -= WaitForPlay;
         SessionState.SetBool("VisionChecksRequested", false);
+        if (SessionState.GetBool("VisionNetworkBenchmark", false))
+        {
+            SessionState.SetBool("VisionNetworkBenchmark", false);
+            StartNetworkBenchmark();
+            return;
+        }
         ExecuteChecks();
     }
 

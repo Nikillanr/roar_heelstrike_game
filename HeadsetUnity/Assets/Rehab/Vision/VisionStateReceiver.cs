@@ -30,6 +30,7 @@ namespace MTPAD.Rehab.Headset.Vision
         public float LeftConfidence { get; private set; }
         public float RightConfidence { get; private set; }
         public int ConnectionRevision { get; private set; }
+        public float LastQueueMilliseconds { get; private set; }
 
         [Serializable]
         private sealed class Message
@@ -46,6 +47,23 @@ namespace MTPAD.Rehab.Headset.Vision
             public string rightState = "";
             public float leftConfidence = -1f;
             public float rightConfidence = -1f;
+            public bool acknowledge = false;
+        }
+
+        [Serializable]
+        private sealed class Acknowledgment
+        {
+            public string type = "vision_ack";
+            public string sessionId;
+            public long sequence;
+            public bool leftVisible;
+            public bool rightVisible;
+            public double unityUpdateMs;
+        }
+
+        private sealed class Peer
+        {
+            public readonly ConcurrentQueue<byte[]> Outgoing = new ConcurrentQueue<byte[]>();
         }
 
         private struct Packet
@@ -53,6 +71,7 @@ namespace MTPAD.Rehab.Headset.Vision
             public string Kind;
             public string Line;
             public double Receipt;
+            public Peer Peer;
         }
 
         // Each start owns its own sockets and queue, including during a rapid Play-mode restart.
@@ -69,6 +88,8 @@ namespace MTPAD.Rehab.Headset.Vision
         private Run run;
         private string sessionId;
         private long sequence = -1;
+        private Peer activePeer;
+        private bool acknowledgmentPending;
 
         private void OnEnable()
         {
@@ -117,8 +138,11 @@ namespace MTPAD.Rehab.Headset.Vision
             Hand = "either";
             Confidence = 0f;
             ReceivedAt = 0d;
+            LastQueueMilliseconds = -1f;
             sessionId = null;
             sequence = -1;
+            activePeer = null;
+            acknowledgmentPending = false;
         }
 
         private void Update()
@@ -131,6 +155,7 @@ namespace MTPAD.Rehab.Headset.Vision
                 if (packet.Kind == "connect")
                 {
                     ClearState();
+                    activePeer = packet.Peer;
                     ConnectionRevision++;
                     Connected = true;
                     Status = "Vision connected; awaiting state";
@@ -188,8 +213,24 @@ namespace MTPAD.Rehab.Headset.Vision
             LeftConfidence = value.v == 2 ? value.leftConfidence : value.confidence;
             RightConfidence = value.v == 2 ? value.rightConfidence : value.confidence;
             ReceivedAt = packet.Receipt;
+            LastQueueMilliseconds = (float)Math.Max(0d, (RehabClock.MonotonicSeconds - packet.Receipt) * 1000d);
             HasState = true;
+            acknowledgmentPending = value.acknowledge;
             Status = "Receiving " + State;
+        }
+
+        // Called after all Update methods. Confirms controller state, not monitor scanout.
+        public void ReportPresentation(bool leftVisible, bool rightVisible)
+        {
+            if (!acknowledgmentPending || activePeer == null) return;
+            acknowledgmentPending = false;
+            if (activePeer.Outgoing.Count >= 128) return;
+            var acknowledgment = new Acknowledgment {
+                sessionId = sessionId, sequence = sequence,
+                leftVisible = leftVisible, rightVisible = rightVisible,
+                unityUpdateMs = Math.Max(0d, (RehabClock.MonotonicSeconds - ReceivedAt) * 1000d)
+            };
+            activePeer.Outgoing.Enqueue(Encoding.UTF8.GetBytes(JsonUtility.ToJson(acknowledgment) + "\n"));
         }
 
         private static bool ValidState(string state)
@@ -202,10 +243,10 @@ namespace MTPAD.Rehab.Headset.Vision
             return !float.IsNaN(confidence) && !float.IsInfinity(confidence) && confidence >= 0f && confidence <= 1f;
         }
 
-        private static void Enqueue(Run current, string kind, string line = null)
+        private static void Enqueue(Run current, string kind, string line = null, Peer peer = null)
         {
             if (current.Queue.Count >= 128) throw new IOException("Vision queue full; reconnect for fresh state.");
-            current.Queue.Enqueue(new Packet { Kind = kind, Line = line, Receipt = RehabClock.MonotonicSeconds });
+            current.Queue.Enqueue(new Packet { Kind = kind, Line = line, Receipt = RehabClock.MonotonicSeconds, Peer = peer });
         }
 
         private static void Listen(Run current)
@@ -223,8 +264,10 @@ namespace MTPAD.Rehab.Headset.Vision
                     try
                     {
                         client.NoDelay = true;
-                        Enqueue(current, "connect");
-                        ReadClient(current, client);
+                        client.SendTimeout = 250;
+                        var peer = new Peer();
+                        Enqueue(current, "connect", peer: peer);
+                        ReadClient(current, client, peer);
                     }
                     catch (Exception error)
                     {
@@ -248,7 +291,7 @@ namespace MTPAD.Rehab.Headset.Vision
             }
         }
 
-        private static void ReadClient(Run current, TcpClient client)
+        private static void ReadClient(Run current, TcpClient client, Peer peer)
         {
             var buffer = new byte[1024];
             var utf8 = new UTF8Encoding(false, true);
@@ -257,6 +300,10 @@ namespace MTPAD.Rehab.Headset.Vision
                 NetworkStream stream = client.GetStream();
                 while (!current.Cancel.IsCancellationRequested)
                 {
+                    byte[] outgoing;
+                    while (peer.Outgoing.TryDequeue(out outgoing)) stream.Write(outgoing, 0, outgoing.Length);
+                    // Wake frequently for acknowledgments without blocking Unity's main thread.
+                    if (!client.Client.Poll(1000, SelectMode.SelectRead)) continue;
                     int count = stream.Read(buffer, 0, buffer.Length);
                     if (count == 0) return;
                     for (int i = 0; i < count; i++)

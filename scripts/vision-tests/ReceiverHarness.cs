@@ -18,6 +18,7 @@ namespace UnityEngine
     public static class Debug { public static void LogError(object message, object context) { } }
     public static class JsonUtility
     {
+        public static string ToJson(object value) { return new JavaScriptSerializer().Serialize(value); }
         public static void FromJsonOverwrite(string json, object result)
         {
             var values = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
@@ -78,11 +79,21 @@ public static class ReceiverHarness
                 Send(stream, up.Substring(20));
                 Pump(receiver);
                 Expect(receiver.HasState && receiver.State == "raised", "split message reconstructed (" + receiver.Status + ", rejected=" + receiver.RejectedMessages + ")");
-                Send(stream, Message(1, "lowered") + Message(2, "raised"));
+                Send(stream, Message(1, "lowered").Replace("\"v\":1,", "\"v\":1,\"acknowledge\":true,"));
+                Pump(receiver);
+                receiver.ReportPresentation(false, false);
+                stream.ReadTimeout = 1000;
+                string ackLine;
+                using (var ackReader = new System.IO.StreamReader(stream, Encoding.UTF8, false, 1024, true))
+                    ackLine = ackReader.ReadLine();
+                var acknowledgment = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(ackLine);
+                Expect((string)acknowledgment["type"] == "vision_ack" && !(bool)acknowledgment["leftVisible"]
+                    && Convert.ToInt64(acknowledgment["sequence"]) == 1, "post-controller acknowledgment sent through the active connection");
+                Send(stream, Message(2, "lowered") + Message(3, "raised"));
                 Pump(receiver);
                 Expect(receiver.State == "raised", "coalesced messages processed in order");
-                Send(stream, Message(1, "lowered") + Message(3, "bad_state") + "not-json\n"
-                    + Message(3, "raised").Replace("\"confidence\":0.9,", ""));
+                Send(stream, Message(1, "lowered") + Message(4, "bad_state") + "not-json\n"
+                    + Message(4, "raised").Replace("\"confidence\":0.9,", ""));
                 Pump(receiver);
                 Expect(receiver.State == "raised" && receiver.RejectedMessages == 4, "stale sequence, invalid messages, and missing fields rejected");
                 Send(stream, Message(4, "unknown"));

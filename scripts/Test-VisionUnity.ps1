@@ -1,5 +1,5 @@
 # Runs actual Unity API checks in a small isolated project. Leaves the user's open project alone.
-param([string]$UnityEditorPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.30f1\Editor\Unity.exe')
+param([string]$UnityEditorPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.30f1\Editor\Unity.exe', [switch]$NetworkBenchmark, [switch]$LiveCameraBenchmark)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $checkRoot = Join-Path $projectRoot '.tools/UnityVisionChecks'
@@ -16,6 +16,31 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'vision-tests/VisionUnityChecks.
 $logPath = Join-Path $checkRoot 'checks.log'
 $arguments = @('-batchmode', '-nographics', '-projectPath', ('"' + $checkRoot + '"'),
     '-executeMethod', 'VisionUnityChecks.Run', '-logFile', ('"' + $logPath + '"'))
+if ($NetworkBenchmark -or $LiveCameraBenchmark) {
+    $arguments[5] = 'VisionUnityChecks.RunNetworkBenchmark'
+    if ($LiveCameraBenchmark) { $arguments[5] = 'VisionUnityChecks.RunLiveBenchmark' }
+    if (Test-Path $logPath) { Remove-Item -LiteralPath $logPath }
+    $process = Start-Process -FilePath $UnityEditorPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    try {
+        $deadline = (Get-Date).AddSeconds(45)
+        while (!(Test-Path $logPath) -or !(Select-String -LiteralPath $logPath -Pattern 'VISION_NETWORK_READY')) {
+            if ($process.HasExited -or (Get-Date) -gt $deadline) { throw "Benchmark Unity did not start. See $logPath" }
+            Start-Sleep -Milliseconds 250
+        }
+        & (Join-Path $projectRoot '.tools/python311/python.exe') (Join-Path $projectRoot 'VisionInput/benchmark_latency.py') --stage unity --port 17778
+        if ($LASTEXITCODE -ne 0) { throw 'Unity latency benchmark failed' }
+        if ($LiveCameraBenchmark) {
+            foreach ($inferenceMode in @('video', 'image')) {
+                & (Join-Path $PSScriptRoot 'Run-Vision.ps1') -Mode webcam -Port 17778 -MeasureSeconds 8 -NoPreview -HoldSeconds 0.05 -InferenceMode $inferenceMode -ReportPath (Join-Path $checkRoot ("live-$inferenceMode.json"))
+                if ($LASTEXITCODE -ne 0) { throw "Live $inferenceMode benchmark failed" }
+            }
+        }
+        $process.WaitForExit(20000) | Out-Null
+    } finally {
+        if (!$process.HasExited) { Stop-Process -Id $process.Id }
+    }
+    exit 0
+}
 $process = Start-Process -FilePath $UnityEditorPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
 $result = $process.ExitCode
 if (Test-Path $logPath) { Get-Content $logPath | Select-String 'VISION_|error CS|Exception' | ForEach-Object Line }
